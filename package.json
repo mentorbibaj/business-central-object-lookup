@@ -1,0 +1,63 @@
+{
+  "name": "business-central-object-lookup",
+  "displayName": "Business Central Object Lookup",
+  "description": "Suggest Business Central object references when typing object IDs in AL files.",
+  "version": "0.0.1",
+  "publisher": "MentorBibaj",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:al",
+    "onCommand:businessCentralObjectLookup.reloadCatalog"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "businessCentralObjectLookup.reloadCatalog",
+        "title": "Business Central Object Lookup: Reload Catalog"
+      }
+    ],
+    "configuration": {
+      "title": "Business Central Object Lookup",
+      "properties": {
+        "businessCentralObjectLookup.catalogPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional workspace-relative or absolute path to an additional JSON catalog of Business Central objects."
+        },
+        "businessCentralObjectLookup.scanWorkspace": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan AL files and .app symbol packages in the current workspace."
+        },
+        "businessCentralObjectLookup.includeBundledCatalog": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include the bundled sample catalog in addition to workspace and custom catalog results."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npm run compile && vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "@types/vscode": "^1.90.0",
+    "@types/yauzl": "^2.10.3",
+    "@vscode/vsce": "^2.32.0",
+    "typescript": "^5.5.2"
+  },
+  "dependencies": {
+    "yauzl": "^3.3.1"
+  }
+}

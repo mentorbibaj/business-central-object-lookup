@@ -1,0 +1,27 @@
+[
+  {
+    "type": "Table",
+    "id": 27,
+    "name": "Item"
+  },
+  {
+    "type": "Page",
+    "id": 27,
+    "name": "Example Page 27"
+  },
+  {
+    "type": "Codeunit",
+    "id": 27,
+    "name": "Example Codeunit 27"
+  },
+  {
+    "type": "Report",
+    "id": 27,
+    "name": "Example Report 27"
+  },
+  {
+    "type": "XMLPort",
+    "id": 27,
+    "name": "Example XMLPort 27"
+  }
+]
