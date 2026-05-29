@@ -5,6 +5,10 @@
   "version": "0.0.1",
   "publisher": "MentorBibaj",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mentorbibaj/business-central-object-lookup.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
