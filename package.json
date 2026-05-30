@@ -2,7 +2,7 @@
   "name": "business-central-object-lookup",
   "displayName": "Business Central Object Lookup",
   "description": "Suggest Business Central object references when typing object IDs in AL files.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "MentorBibaj",
   "license": "MIT",
   "icon": "assets/icon.png",

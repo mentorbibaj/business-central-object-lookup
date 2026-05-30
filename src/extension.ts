@@ -3,12 +3,15 @@ import { ObjectCatalog } from './objectCatalog';
 import { BusinessCentralObject } from './types';
 
 const digitTriggers = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+const autoReloadDelayInMs = 1500;
 
 type InsertContext = 'variableDeclaration' | 'objectReference';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const catalog = new ObjectCatalog(context.extensionUri);
-  await loadCatalogWithStatus(catalog, false);
+  const outputChannel = vscode.window.createOutputChannel('Business Central Object Lookup');
+  const catalogReloader = new CatalogReloader(catalog, outputChannel);
+  await catalogReloader.reload(false);
 
   const completionProvider = vscode.languages.registerCompletionItemProvider(
     { language: 'al' },
@@ -17,10 +20,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   const reloadCommand = vscode.commands.registerCommand('businessCentralObjectLookup.reloadCatalog', async () => {
-    await loadCatalogWithStatus(catalog, true);
+    await catalogReloader.reload(true);
   });
 
-  context.subscriptions.push(completionProvider, reloadCommand);
+  context.subscriptions.push(
+    outputChannel,
+    catalogReloader,
+    completionProvider,
+    reloadCommand,
+    new CatalogWatcherManager(catalogReloader)
+  );
 }
 
 export function deactivate(): void {}
@@ -176,20 +185,140 @@ class BusinessCentralObjectCompletionProvider implements vscode.CompletionItemPr
   }
 }
 
-async function loadCatalogWithStatus(catalog: ObjectCatalog, showSuccess: boolean): Promise<void> {
-  try {
-    const result = await catalog.load();
-    if (showSuccess) {
+class CatalogReloader implements vscode.Disposable {
+  private reloadTimer: NodeJS.Timeout | undefined;
+  private isReloading = false;
+  private pendingReload = false;
+
+  public constructor(
+    private readonly catalog: ObjectCatalog,
+    private readonly outputChannel: vscode.OutputChannel
+  ) {}
+
+  public schedule(): void {
+    if (this.reloadTimer) {
+      clearTimeout(this.reloadTimer);
+    }
+
+    this.reloadTimer = setTimeout(() => {
+      this.reloadTimer = undefined;
+      void this.reload(false);
+    }, autoReloadDelayInMs);
+  }
+
+  public async reload(showSuccess: boolean): Promise<void> {
+    if (this.isReloading) {
+      this.pendingReload = true;
+      return;
+    }
+
+    this.isReloading = true;
+
+    try {
+      const result = await this.catalog.load();
       const message = `Business Central object catalog reloaded: ${result.objectCount} objects from ${result.sourceCount} source(s).`;
       if (result.warnings.length > 0) {
-        vscode.window.showWarningMessage(`${message} ${result.warnings.length} package(s) skipped.`);
-        console.warn(`[Business Central Object Lookup] ${result.warnings.join('\n')}`);
+        this.outputChannel.appendLine(`${message} ${result.warnings.length} package(s) skipped.`);
+        for (const warning of result.warnings) {
+          this.outputChannel.appendLine(warning);
+        }
+
+        if (showSuccess) {
+          vscode.window.showWarningMessage(`${message} ${result.warnings.length} package(s) skipped.`);
+        }
       } else {
-        vscode.window.showInformationMessage(message);
+        this.outputChannel.appendLine(message);
+        if (showSuccess) {
+          vscode.window.showInformationMessage(message);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.outputChannel.appendLine(`Business Central object catalog could not be loaded: ${message}`);
+      if (showSuccess) {
+        vscode.window.showErrorMessage(`Business Central object catalog could not be loaded: ${message}`);
+      }
+    } finally {
+      this.isReloading = false;
+
+      if (this.pendingReload) {
+        this.pendingReload = false;
+        this.schedule();
       }
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    vscode.window.showErrorMessage(`Business Central object catalog could not be loaded: ${message}`);
+  }
+
+  public dispose(): void {
+    if (this.reloadTimer) {
+      clearTimeout(this.reloadTimer);
+    }
+  }
+}
+
+class CatalogWatcherManager implements vscode.Disposable {
+  private readonly disposables: vscode.Disposable[] = [];
+  private customCatalogWatcher: vscode.Disposable | undefined;
+
+  public constructor(private readonly reloader: CatalogReloader) {
+    this.watchWorkspaceFiles('**/*.al');
+    this.watchWorkspaceFiles('**/*.app');
+    this.resetCustomCatalogWatcher();
+
+    this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration('businessCentralObjectLookup')) {
+        return;
+      }
+
+      this.resetCustomCatalogWatcher();
+      this.reloader.schedule();
+    }));
+  }
+
+  public dispose(): void {
+    this.customCatalogWatcher?.dispose();
+    for (const disposable of this.disposables) {
+      disposable.dispose();
+    }
+  }
+
+  private watchWorkspaceFiles(pattern: vscode.GlobPattern): void {
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+    this.disposables.push(
+      watcher,
+      watcher.onDidCreate(() => this.reloader.schedule()),
+      watcher.onDidChange(() => this.reloader.schedule()),
+      watcher.onDidDelete(() => this.reloader.schedule())
+    );
+  }
+
+  private resetCustomCatalogWatcher(): void {
+    this.customCatalogWatcher?.dispose();
+    this.customCatalogWatcher = this.createCustomCatalogWatcher();
+  }
+
+  private createCustomCatalogWatcher(): vscode.Disposable | undefined {
+    const configuredPath = vscode.workspace
+      .getConfiguration('businessCentralObjectLookup')
+      .get<string>('catalogPath', '')
+      .trim();
+
+    if (!configuredPath) {
+      return undefined;
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      return undefined;
+    }
+
+    const pattern = new vscode.RelativePattern(workspaceFolder, configuredPath.replaceAll('\\', '/'));
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+    return vscode.Disposable.from(
+      watcher,
+      watcher.onDidCreate(() => this.reloader.schedule()),
+      watcher.onDidChange(() => this.reloader.schedule()),
+      watcher.onDidDelete(() => this.reloader.schedule())
+    );
   }
 }
