@@ -6,9 +6,10 @@ const digitTriggers = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 const autoReloadDelayInMs = 1500;
 
 type InsertContext = 'variableDeclaration' | 'objectReference';
+type CatalogChangeKind = 'update' | 'delete';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  const catalog = new ObjectCatalog(context.extensionUri);
+  const catalog = new ObjectCatalog(context.extensionUri, context.globalStorageUri);
   const outputChannel = vscode.window.createOutputChannel('Business Central Object Lookup');
   const catalogReloader = new CatalogReloader(catalog, outputChannel);
   await catalogReloader.reload(false);
@@ -20,7 +21,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   const reloadCommand = vscode.commands.registerCommand('businessCentralObjectLookup.reloadCatalog', async () => {
-    await catalogReloader.reload(true);
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Loading Business Central object catalog...',
+        cancellable: false
+      },
+      async () => catalogReloader.reload(true)
+    );
   });
 
   context.subscriptions.push(
@@ -154,7 +162,7 @@ class BusinessCentralObjectCompletionProvider implements vscode.CompletionItemPr
   private getObjectReferenceQualifier(type: string): string {
     const normalizedType = type.toLowerCase();
     const qualifiers: Record<string, string> = {
-      table: 'DATABASE',
+      table: 'Database',
       page: 'Page',
       codeunit: 'Codeunit',
       report: 'Report',
@@ -188,61 +196,54 @@ class BusinessCentralObjectCompletionProvider implements vscode.CompletionItemPr
 class CatalogReloader implements vscode.Disposable {
   private reloadTimer: NodeJS.Timeout | undefined;
   private isReloading = false;
-  private pendingReload = false;
+  private pendingFullReload = false;
+  private readonly pendingSourceChanges = new Map<string, { uri: vscode.Uri; kind: CatalogChangeKind }>();
 
   public constructor(
     private readonly catalog: ObjectCatalog,
     private readonly outputChannel: vscode.OutputChannel
   ) {}
 
-  public schedule(): void {
+  public scheduleFullReload(): void {
+    this.pendingFullReload = true;
+    this.schedule();
+  }
+
+  public scheduleSourceChange(uri: vscode.Uri, kind: CatalogChangeKind): void {
+    this.pendingSourceChanges.set(uri.fsPath.toLowerCase(), { uri, kind });
+    this.schedule();
+  }
+
+  private schedule(): void {
     if (this.reloadTimer) {
       clearTimeout(this.reloadTimer);
     }
 
     this.reloadTimer = setTimeout(() => {
       this.reloadTimer = undefined;
-      void this.reload(false);
+      void this.flushPendingChanges();
     }, autoReloadDelayInMs);
   }
 
   public async reload(showSuccess: boolean): Promise<void> {
     if (this.isReloading) {
-      this.pendingReload = true;
+      this.pendingFullReload = true;
       return;
     }
 
     this.isReloading = true;
+    this.pendingFullReload = false;
+    this.pendingSourceChanges.clear();
 
     try {
       const result = await this.catalog.load();
-      const message = `Business Central object catalog reloaded: ${result.objectCount} objects from ${result.sourceCount} source(s).`;
-      if (result.warnings.length > 0) {
-        this.outputChannel.appendLine(`${message} ${result.warnings.length} package(s) skipped.`);
-        for (const warning of result.warnings) {
-          this.outputChannel.appendLine(warning);
-        }
-
-        if (showSuccess) {
-          vscode.window.showWarningMessage(`${message} ${result.warnings.length} package(s) skipped.`);
-        }
-      } else {
-        this.outputChannel.appendLine(message);
-        if (showSuccess) {
-          vscode.window.showInformationMessage(message);
-        }
-      }
+      this.reportResult('Business Central object catalog reloaded', result, showSuccess);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.outputChannel.appendLine(`Business Central object catalog could not be loaded: ${message}`);
-      if (showSuccess) {
-        vscode.window.showErrorMessage(`Business Central object catalog could not be loaded: ${message}`);
-      }
+      this.reportError(error, showSuccess);
     } finally {
       this.isReloading = false;
 
-      if (this.pendingReload) {
-        this.pendingReload = false;
+      if (this.pendingFullReload || this.pendingSourceChanges.size > 0) {
         this.schedule();
       }
     }
@@ -251,6 +252,82 @@ class CatalogReloader implements vscode.Disposable {
   public dispose(): void {
     if (this.reloadTimer) {
       clearTimeout(this.reloadTimer);
+    }
+  }
+
+  private async flushPendingChanges(): Promise<void> {
+    if (this.pendingFullReload) {
+      await this.reload(false);
+      return;
+    }
+
+    const changes = [...this.pendingSourceChanges.values()];
+    this.pendingSourceChanges.clear();
+
+    if (changes.length === 0) {
+      return;
+    }
+
+    if (this.isReloading) {
+      for (const change of changes) {
+        this.pendingSourceChanges.set(change.uri.fsPath.toLowerCase(), change);
+      }
+      return;
+    }
+
+    this.isReloading = true;
+
+    try {
+      let lastResult: Awaited<ReturnType<ObjectCatalog['updateSource']>> | undefined;
+      for (const change of changes) {
+        lastResult = change.kind === 'delete'
+          ? this.catalog.deleteSource(change.uri)
+          : await this.catalog.updateSource(change.uri);
+      }
+
+      if (lastResult) {
+        this.reportResult(`Business Central object catalog updated from ${changes.length} changed file(s)`, lastResult, false);
+      }
+    } catch (error) {
+      this.reportError(error, false);
+    } finally {
+      this.isReloading = false;
+
+      if (this.pendingFullReload || this.pendingSourceChanges.size > 0) {
+        this.schedule();
+      }
+    }
+  }
+
+  private reportResult(
+    action: string,
+    result: Awaited<ReturnType<ObjectCatalog['load']>>,
+    showSuccess: boolean
+  ): void {
+    const message = `${action}: ${result.objectCount} objects from ${result.sourceCount} source(s).`;
+    if (result.warnings.length > 0) {
+      this.outputChannel.appendLine(`${message} ${result.warnings.length} package(s) skipped.`);
+      for (const warning of result.warnings) {
+        this.outputChannel.appendLine(warning);
+      }
+
+      if (showSuccess) {
+        vscode.window.showWarningMessage(`${message} ${result.warnings.length} package(s) skipped.`);
+      }
+      return;
+    }
+
+    this.outputChannel.appendLine(message);
+    if (showSuccess) {
+      vscode.window.showInformationMessage(message);
+    }
+  }
+
+  private reportError(error: unknown, showError: boolean): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.outputChannel.appendLine(`Business Central object catalog could not be loaded: ${message}`);
+    if (showError) {
+      vscode.window.showErrorMessage(`Business Central object catalog could not be loaded: ${message}`);
     }
   }
 }
@@ -270,7 +347,7 @@ class CatalogWatcherManager implements vscode.Disposable {
       }
 
       this.resetCustomCatalogWatcher();
-      this.reloader.schedule();
+      this.reloader.scheduleFullReload();
     }));
   }
 
@@ -285,9 +362,9 @@ class CatalogWatcherManager implements vscode.Disposable {
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
     this.disposables.push(
       watcher,
-      watcher.onDidCreate(() => this.reloader.schedule()),
-      watcher.onDidChange(() => this.reloader.schedule()),
-      watcher.onDidDelete(() => this.reloader.schedule())
+      watcher.onDidCreate((uri) => this.reloader.scheduleSourceChange(uri, 'update')),
+      watcher.onDidChange((uri) => this.reloader.scheduleSourceChange(uri, 'update')),
+      watcher.onDidDelete((uri) => this.reloader.scheduleSourceChange(uri, 'delete'))
     );
   }
 
@@ -316,9 +393,9 @@ class CatalogWatcherManager implements vscode.Disposable {
 
     return vscode.Disposable.from(
       watcher,
-      watcher.onDidCreate(() => this.reloader.schedule()),
-      watcher.onDidChange(() => this.reloader.schedule()),
-      watcher.onDidDelete(() => this.reloader.schedule())
+      watcher.onDidCreate((uri) => this.reloader.scheduleSourceChange(uri, 'update')),
+      watcher.onDidChange((uri) => this.reloader.scheduleSourceChange(uri, 'update')),
+      watcher.onDidDelete((uri) => this.reloader.scheduleSourceChange(uri, 'delete'))
     );
   }
 }

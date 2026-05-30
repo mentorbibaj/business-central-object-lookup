@@ -19,9 +19,9 @@ By default, the extension scans the current workspace for:
 
 That means standard packages in folders like `.alpackages` and project AL files can be suggested automatically.
 
-The catalog reloads automatically after AL files, app packages, or the configured custom catalog change. The reload is debounced and silent, so it should not interrupt normal editing.
+The catalog reloads automatically after AL files, app packages, or the configured custom catalog change. File changes update only the changed source in the catalog, and the reload is debounced and silent so it should not interrupt normal editing.
 
-You can still run `Business Central Object Lookup: Reload Catalog` manually when you want a visible reload status.
+You can still run `Business Central Object Lookup: Reload Catalog` manually when you want a visible full reload status.
 
 ## Add More Objects Manually
 
